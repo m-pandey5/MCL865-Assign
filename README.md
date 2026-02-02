@@ -74,7 +74,13 @@ Each script will:
 
 ## Solver
 
-The implementations use Google OR-Tools with the CBC solver (open-source). For better performance on larger instances, you can use commercial solvers like Gurobi or CPLEX by changing the solver name in the code.
+The implementations use AMPL (A Mathematical Programming Language) with a mixed-integer programming solver. By default, the code uses CBC (open-source). For better performance on larger instances, you can use commercial solvers like CPLEX or Gurobi by changing the solver option in the code:
+
+```python
+ampl.setOption("solver", "cplex")  # or "gurobi", "cbc", etc.
+```
+
+Note: You need to have AMPL installed and the desired solver licensed/installed on your system.
 
 ## Notes
 

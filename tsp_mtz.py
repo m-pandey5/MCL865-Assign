@@ -1,13 +1,13 @@
 """
-Traveling Salesman Problem (TSP) - MTZ Formulation
+Traveling Salesman Problem (TSP) - MTZ Formulation using AMPL
 Miller-Tucker-Zemlin (MTZ) formulation uses auxiliary ordering variables to prevent subtours.
 """
 
-from ortools.linear_solver import pywraplp
+from amplpy import AMPL
 
 def solve_tsp_mtz():
     """
-    Solve TSP using MTZ formulation.
+    Solve TSP using MTZ formulation with AMPL.
     Cities: V = {1, 2, 3, 4, 5, 6}
     City 1 is fixed at position 1 (u_1 = 1)
     """
@@ -28,70 +28,65 @@ def solve_tsp_mtz():
         (6, 1): 25, (6, 2): 30, (6, 3): 18, (6, 4): 14, (6, 5): 16, (6, 6): M,
     }
     
-    # Create solver
-    solver = pywraplp.Solver.CreateSolver('CBC')
-    if not solver:
-        print('Could not create solver')
-        return
+    # Create AMPL instance
+    ampl = AMPL()
     
-    # Decision variables: x_ij = 1 if tour goes from city i to city j, 0 otherwise
-    x = {}
-    for i in cities:
-        for j in cities:
-            if i != j:
-                x[i, j] = solver.IntVar(0, 1, f'x_{i}_{j}')
+    # Define model
+    ampl.eval("""
+    # Sets
+    set V;  # Set of cities
     
-    # Auxiliary variables: u_i represents the position of city i in the tour
-    # u_i is continuous and satisfies: 1 <= u_i <= n for all i
-    u = {}
-    for i in cities:
-        u[i] = solver.NumVar(1, n, f'u_{i}')
+    # Parameters
+    param c{V, V} >= 0;  # Cost matrix
+    param n;  # Number of cities
+    
+    # Decision variables
+    var x{V, V} binary;  # x[i,j] = 1 if tour goes from city i to city j
+    var u{V} >= 1, <= n;  # Auxiliary variable: position of city i in the tour
     
     # Objective: Minimize total travel cost
-    objective = solver.Objective()
-    for i in cities:
-        for j in cities:
-            if i != j:
-                objective.SetCoefficient(x[i, j], costs[i, j])
-    objective.SetMinimization()
+    minimize TotalCost: sum{i in V, j in V: i != j} c[i,j] * x[i,j];
     
     # Constraints: Each city is entered exactly once
-    for j in cities:
-        constraint = solver.Constraint(1, 1, f'enter_city_{j}')
-        for i in cities:
-            if i != j:
-                constraint.SetCoefficient(x[i, j], 1)
+    subject to EnterCity{j in V}:
+        sum{i in V: i != j} x[i,j] = 1;
     
     # Constraints: Each city is left exactly once
-    for i in cities:
-        constraint = solver.Constraint(1, 1, f'leave_city_{i}')
-        for j in cities:
-            if j != i:
-                constraint.SetCoefficient(x[i, j], 1)
+    subject to LeaveCity{i in V}:
+        sum{j in V: j != i} x[i,j] = 1;
     
     # MTZ: Fix position of city 1 (u_1 = 1)
-    constraint = solver.Constraint(1, 1, 'fix_u1')
-    constraint.SetCoefficient(u[1], 1)
+    subject to FixU1:
+        u[1] = 1;
     
     # MTZ Subtour Elimination Constraints
     # u_i - u_j + n * x_ij <= n - 1 for all i != j, i, j in V \ {1}
-    # This prevents subtours by making cyclic ordering impossible
+    subject to MTZ{i in V, j in V: i != j and i != 1 and j != 1}:
+        u[i] - u[j] + n * x[i,j] <= n - 1;
+    """)
+    
+    # Set data
+    ampl.set["V"] = cities
+    ampl.param["n"] = n
+    
+    # Set cost matrix
     for i in cities:
-        if i != 1:
-            for j in cities:
-                if j != 1 and i != j:
-                    constraint = solver.Constraint(-solver.infinity(), n - 1, f'mtz_{i}_{j}')
-                    constraint.SetCoefficient(u[i], 1)
-                    constraint.SetCoefficient(u[j], -1)
-                    constraint.SetCoefficient(x[i, j], n)
+        for j in cities:
+            ampl.param["c"][i, j] = costs[i, j]
+    
+    # Set solver (using CBC as default, can be changed to CPLEX, Gurobi, etc.)
+    ampl.setOption("solver", "cbc")
     
     # Solve
-    print('Solving TSP with MTZ formulation...')
-    status = solver.Solve()
+    print('Solving TSP with MTZ formulation using AMPL...')
+    ampl.solve()
     
-    if status == pywraplp.Solver.OPTIMAL:
+    # Check solution status
+    solve_result = ampl.getValue("solve_result")
+    if solve_result == "solved" or solve_result == "solved?":
         print(f'\nOptimal solution found!')
-        print(f'Total cost: {solver.Objective().Value()}\n')
+        objective_value = ampl.getValue("TotalCost")
+        print(f'Total cost: {objective_value}\n')
         
         # Extract tour
         tour = []
@@ -102,19 +97,23 @@ def solve_tsp_mtz():
             tour.append(current_city)
             visited.add(current_city)
             for j in cities:
-                if j not in visited and x[current_city, j].solution_value() > 0.5:
-                    current_city = j
-                    break
+                if j not in visited:
+                    x_val = ampl.getVariable("x")[current_city, j].value()
+                    if x_val > 0.5:
+                        current_city = j
+                        break
             else:
                 # Return to start
-                if x[current_city, 1].solution_value() > 0.5:
+                x_val = ampl.getVariable("x")[current_city, 1].value()
+                if x_val > 0.5:
                     tour.append(1)
                 break
         
         print('Tour:', ' -> '.join(map(str, tour)))
         print('\nCity positions in tour (u_i values):')
         for city in cities:
-            print(f'  City {city}: position {u[city].solution_value():.2f}')
+            u_val = ampl.getVariable("u")[city].value()
+            print(f'  City {city}: position {u_val:.2f}')
         print('\nDetailed route:')
         total_cost = 0
         for i in range(len(tour) - 1):
@@ -126,9 +125,8 @@ def solve_tsp_mtz():
         print(f'\nTotal cost: {total_cost}')
         
     else:
+        print(f'Solution status: {solve_result}')
         print('No optimal solution found.')
-        print(f'Solver status: {status}')
 
 if __name__ == '__main__':
     solve_tsp_mtz()
-

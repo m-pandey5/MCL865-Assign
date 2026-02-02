@@ -1,14 +1,14 @@
 """
-Traveling Salesman Problem (TSP) - DFJ Formulation
+Traveling Salesman Problem (TSP) - DFJ Formulation using AMPL
 Dantzig-Fulkerson-Johnson (DFJ) formulation eliminates subtours by explicitly forbidding them.
 """
 
-from ortools.linear_solver import pywraplp
+from amplpy import AMPL
 import itertools
 
 def solve_tsp_dfj():
     """
-    Solve TSP using DFJ formulation.
+    Solve TSP using DFJ formulation with AMPL.
     Cities: V = {1, 2, 3, 4, 5, 6}
     """
     
@@ -28,62 +28,66 @@ def solve_tsp_dfj():
         (6, 1): 25, (6, 2): 30, (6, 3): 18, (6, 4): 14, (6, 5): 16, (6, 6): M,
     }
     
-    # Create solver
-    solver = pywraplp.Solver.CreateSolver('CBC')
-    if not solver:
-        print('Could not create solver')
-        return
+    # Create AMPL instance
+    ampl = AMPL()
     
-    # Decision variables: x_ij = 1 if tour goes from city i to city j, 0 otherwise
-    x = {}
-    for i in cities:
-        for j in cities:
-            if i != j:
-                x[i, j] = solver.IntVar(0, 1, f'x_{i}_{j}')
+    # Define model
+    ampl.eval("""
+    # Sets
+    set V;  # Set of cities
+    
+    # Parameters
+    param c{V, V} >= 0;  # Cost matrix
+    
+    # Decision variables
+    var x{V, V} binary;  # x[i,j] = 1 if tour goes from city i to city j
     
     # Objective: Minimize total travel cost
-    objective = solver.Objective()
-    for i in cities:
-        for j in cities:
-            if i != j:
-                objective.SetCoefficient(x[i, j], costs[i, j])
-    objective.SetMinimization()
+    minimize TotalCost: sum{i in V, j in V: i != j} c[i,j] * x[i,j];
     
     # Constraints: Each city is entered exactly once
-    for j in cities:
-        constraint = solver.Constraint(1, 1, f'enter_city_{j}')
-        for i in cities:
-            if i != j:
-                constraint.SetCoefficient(x[i, j], 1)
+    subject to EnterCity{j in V}:
+        sum{i in V: i != j} x[i,j] = 1;
     
     # Constraints: Each city is left exactly once
-    for i in cities:
-        constraint = solver.Constraint(1, 1, f'leave_city_{i}')
-        for j in cities:
-            if j != i:
-                constraint.SetCoefficient(x[i, j], 1)
+    subject to LeaveCity{i in V}:
+        sum{j in V: j != i} x[i,j] = 1;
+    """)
     
-    # DFJ Subtour Elimination Constraints
+    # Set data
+    ampl.set["V"] = cities
+    
+    # Set cost matrix
+    for i in cities:
+        for j in cities:
+            ampl.param["c"][i, j] = costs[i, j]
+    
+    # Add DFJ Subtour Elimination Constraints
     # For every subset S of cities with |S| >= 2, sum_{i in S} sum_{j in S} x_ij <= |S| - 1
-    # We'll add these constraints iteratively as needed (lazy constraints)
-    # For now, we add constraints for all subsets of size 2 to n-1
-    subtour_constraints = []
+    print('Adding DFJ subtour elimination constraints...')
+    constraint_num = 1
     for subset_size in range(2, n):
         for subset in itertools.combinations(cities, subset_size):
-            constraint = solver.Constraint(0, len(subset) - 1, f'subtour_{subset}')
-            for i in subset:
-                for j in subset:
-                    if i != j:
-                        constraint.SetCoefficient(x[i, j], 1)
-            subtour_constraints.append(constraint)
+            subset_str = "{" + ", ".join(map(str, subset)) + "}"
+            ampl.eval(f"""
+            subject to SubtourElim_{constraint_num}:
+                sum{{i in {subset_str}, j in {subset_str}: i != j}} x[i,j] <= {len(subset) - 1};
+            """)
+            constraint_num += 1
+    
+    # Set solver (using CBC as default, can be changed to CPLEX, Gurobi, etc.)
+    ampl.setOption("solver", "cbc")
     
     # Solve
-    print('Solving TSP with DFJ formulation...')
-    status = solver.Solve()
+    print('Solving TSP with DFJ formulation using AMPL...')
+    ampl.solve()
     
-    if status == pywraplp.Solver.OPTIMAL:
+    # Check solution status
+    solve_result = ampl.getValue("solve_result")
+    if solve_result == "solved" or solve_result == "solved?":
         print(f'\nOptimal solution found!')
-        print(f'Total cost: {solver.Objective().Value()}\n')
+        objective_value = ampl.getValue("TotalCost")
+        print(f'Total cost: {objective_value}\n')
         
         # Extract tour
         tour = []
@@ -94,12 +98,15 @@ def solve_tsp_dfj():
             tour.append(current_city)
             visited.add(current_city)
             for j in cities:
-                if j not in visited and x[current_city, j].solution_value() > 0.5:
-                    current_city = j
-                    break
+                if j not in visited:
+                    x_val = ampl.getVariable("x")[current_city, j].value()
+                    if x_val > 0.5:
+                        current_city = j
+                        break
             else:
                 # Return to start
-                if x[current_city, 1].solution_value() > 0.5:
+                x_val = ampl.getVariable("x")[current_city, 1].value()
+                if x_val > 0.5:
                     tour.append(1)
                 break
         
@@ -115,9 +122,8 @@ def solve_tsp_dfj():
         print(f'\nTotal cost: {total_cost}')
         
     else:
+        print(f'Solution status: {solve_result}')
         print('No optimal solution found.')
-        print(f'Solver status: {status}')
 
 if __name__ == '__main__':
     solve_tsp_dfj()
-

@@ -1,16 +1,16 @@
 """
-Vehicle Routing Problem (VRP)
+Vehicle Routing Problem (VRP) using AMPL
 Extension of TSP where multiple vehicles start and end at a depot.
 Each customer must be visited exactly once by exactly one vehicle.
 No capacity restrictions on vehicles.
 """
 
-from ortools.linear_solver import pywraplp
+from amplpy import AMPL
 import itertools
 
 def solve_vrp():
     """
-    Solve VRP with DFJ subtour elimination constraints.
+    Solve VRP with DFJ subtour elimination constraints using AMPL.
     V = {0, 1, 2, ..., n} where 0 is the depot
     K = {1, 2, ..., m} is the set of vehicles
     """
@@ -60,79 +60,80 @@ def solve_vrp():
                 # Cost between customers
                 costs[i, j] = tsp_costs[i, j] if (i, j) in tsp_costs else M
     
-    # Create solver
-    solver = pywraplp.Solver.CreateSolver('CBC')
-    if not solver:
-        print('Could not create solver')
-        return
+    # Create AMPL instance
+    ampl = AMPL()
     
-    # Decision variables: x_ij^k = 1 if vehicle k travels from node i to node j, 0 otherwise
-    x = {}
-    for k in vehicles:
-        for i in nodes:
-            for j in nodes:
-                if i != j:
-                    x[i, j, k] = solver.IntVar(0, 1, f'x_{i}_{j}_{k}')
+    # Define model
+    ampl.eval("""
+    # Sets
+    set V;  # Set of nodes (including depot 0)
+    set Customers;  # Set of customers (V \ {0})
+    set K;  # Set of vehicles
+    
+    # Parameters
+    param c{V, V} >= 0;  # Cost matrix
+    
+    # Decision variables
+    var x{V, V, K} binary;  # x[i,j,k] = 1 if vehicle k travels from node i to node j
     
     # Objective: Minimize total travel cost
-    objective = solver.Objective()
-    for k in vehicles:
-        for i in nodes:
-            for j in nodes:
-                if i != j:
-                    objective.SetCoefficient(x[i, j, k], costs[i, j])
-    objective.SetMinimization()
+    minimize TotalCost: sum{k in K, i in V, j in V: i != j} c[i,j] * x[i,j,k];
     
     # Constraints: Each customer is visited exactly once
-    for i in customers:
-        constraint = solver.Constraint(1, 1, f'visit_customer_{i}')
-        for k in vehicles:
-            for j in nodes:
-                if j != i:
-                    constraint.SetCoefficient(x[j, i, k], 1)
+    subject to VisitCustomer{i in Customers}:
+        sum{k in K, j in V: j != i} x[j,i,k] = 1;
     
     # Constraints: Flow conservation for each vehicle
     # For each node i and vehicle k: sum of incoming = sum of outgoing
-    for k in vehicles:
-        for i in nodes:
-            constraint = solver.Constraint(0, 0, f'flow_{i}_{k}')
-            for j in nodes:
-                if j != i:
-                    constraint.SetCoefficient(x[i, j, k], 1)
-                    constraint.SetCoefficient(x[j, i, k], -1)
+    subject to FlowConservation{i in V, k in K}:
+        sum{j in V: j != i} x[i,j,k] = sum{j in V: j != i} x[j,i,k];
     
     # Constraints: Each vehicle can leave the depot at most once
-    for k in vehicles:
-        constraint = solver.Constraint(0, 1, f'leave_depot_{k}')
-        for j in customers:
-            constraint.SetCoefficient(x[depot, j, k], 1)
+    subject to LeaveDepot{k in K}:
+        sum{j in Customers} x[0,j,k] <= 1;
     
     # Constraints: Each vehicle can return to the depot at most once
-    for k in vehicles:
-        constraint = solver.Constraint(0, 1, f'return_depot_{k}')
-        for i in customers:
-            constraint.SetCoefficient(x[i, depot, k], 1)
+    subject to ReturnDepot{k in K}:
+        sum{i in Customers} x[i,0,k] <= 1;
+    """)
     
-    # DFJ Subtour Elimination Constraints
+    # Set data
+    ampl.set["V"] = nodes
+    ampl.set["Customers"] = customers
+    ampl.set["K"] = vehicles
+    
+    # Set cost matrix
+    for i in nodes:
+        for j in nodes:
+            ampl.param["c"][i, j] = costs[i, j]
+    
+    # Add DFJ Subtour Elimination Constraints
     # For every subset S of customers (S ⊆ V \ {0}, 2 <= |S| <= n):
     # sum_{k in K} sum_{i in S} sum_{j in S} x_ij^k <= |S| - 1
     print('Adding DFJ subtour elimination constraints...')
+    constraint_num = 1
     for subset_size in range(2, n + 1):
         for subset in itertools.combinations(customers, subset_size):
-            constraint = solver.Constraint(0, len(subset) - 1, f'subtour_{subset}')
-            for k in vehicles:
-                for i in subset:
-                    for j in subset:
-                        if i != j:
-                            constraint.SetCoefficient(x[i, j, k], 1)
+            subset_str = "{" + ", ".join(map(str, subset)) + "}"
+            ampl.eval(f"""
+            subject to SubtourElim_{constraint_num}:
+                sum{{k in K, i in {subset_str}, j in {subset_str}: i != j}} x[i,j,k] <= {len(subset) - 1};
+            """)
+            constraint_num += 1
+    
+    # Set solver (using CBC as default, can be changed to CPLEX, Gurobi, etc.)
+    ampl.setOption("solver", "cbc")
     
     # Solve
-    print('Solving VRP with DFJ formulation...')
-    status = solver.Solve()
+    print('Solving VRP with DFJ formulation using AMPL...')
+    ampl.solve()
     
-    if status == pywraplp.Solver.OPTIMAL:
+    # Check solution status
+    solve_result = ampl.getValue("solve_result")
+    if solve_result == "solved" or solve_result == "solved?":
         print(f'\nOptimal solution found!')
-        print(f'Total cost: {solver.Objective().Value()}\n')
+        objective_value = ampl.getValue("TotalCost")
+        print(f'Total cost: {objective_value}\n')
         
         # Extract routes for each vehicle
         all_visited = set()
@@ -144,7 +145,8 @@ def solve_vrp():
             
             # Find starting point (depot -> customer)
             for j in customers:
-                if x[depot, j, k].solution_value() > 0.5:
+                x_val = ampl.getVariable("x")[depot, j, k].value()
+                if x_val > 0.5:
                     current_node = j
                     route.append(depot)
                     route.append(j)
@@ -156,17 +158,19 @@ def solve_vrp():
             while current_node != depot:
                 found_next = False
                 for j in nodes:
-                    if j != current_node and x[current_node, j, k].solution_value() > 0.5:
-                        if j == depot:
-                            route.append(depot)
-                            break
-                        elif j not in visited:
-                            route.append(j)
-                            visited.add(j)
-                            all_visited.add(j)
-                            current_node = j
-                            found_next = True
-                            break
+                    if j != current_node:
+                        x_val = ampl.getVariable("x")[current_node, j, k].value()
+                        if x_val > 0.5:
+                            if j == depot:
+                                route.append(depot)
+                                break
+                            elif j not in visited:
+                                route.append(j)
+                                visited.add(j)
+                                all_visited.add(j)
+                                current_node = j
+                                found_next = True
+                                break
                 if not found_next or current_node == depot:
                     break
             
@@ -191,9 +195,8 @@ def solve_vrp():
             print(f'Visited customers: {sorted(all_visited)}')
         
     else:
+        print(f'Solution status: {solve_result}')
         print('No optimal solution found.')
-        print(f'Solver status: {status}')
 
 if __name__ == '__main__':
     solve_vrp()
-
